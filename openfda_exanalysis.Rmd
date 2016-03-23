@@ -1,0 +1,158 @@
+---
+title: "openFDA exploratory analysis"
+author: "Mary T-M"
+date: "February 2016"
+output: html_document
+---
+
+
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+library(ggplot2)
+library(caret)
+library(plyr)
+library(dplyr, quietly=TRUE)
+library(tidyr)
+data <- read.csv("problemsample.csv")
+data <- subset(data, select = -X )
+hasvalues <- subset(data, event_type %in% c("Death", "Injury", "Malfunction"))
+bigdata <- read.csv("largesample.csv")
+bigdata <- subset(bigdata, select = -X)
+bigdata <- tbl_df(bigdata)
+bighasvalues <- subset(bigdata, event_type %in% c("Death", "Injury", "Malfunction"))
+```
+
+
+We begin by grouping by manufacturer after cleaning up the strings. Baxter and Medtronic appear to be outliers but they are also large companies so it may simply be a function of market share.
+
+```{r, echo=FALSE}
+hasvalues$manufacturer <- gsub("ST JUDE MEDICAL CARDIAC RHYTHM MANAGEMENT DIVISION", "ST JUDE MEDICAL",hasvalues$manufacturer)
+hasvalues$manufacturer <- gsub("LIFESCAN EUROPE, A DIVISION OF CILAG GMBH INTL", "LIFESCAN EUROPE", hasvalues$manufacturer)
+hasvalues$manufacturer <- gsub("MEDTRONIC PUERTO RICO OPERATIONS CO", "MEDTRONIC PUERTO RICO", hasvalues$manufacturer)
+hasvalues$manufacturer <- gsub( "MDT PUERTO RICO OPERATIONS CO", "MEDTRONIC PUERTO RICO", hasvalues$manufacturer)
+hasvalues$manufacturer <- gsub("MEDTRONIC PUERTO RICO, INC", "MEDTRONIC PUERTO RICO", hasvalues$manufacturer)
+hasvalues$manufacturer <- gsub("MEDTRONIC PUERTO RICO.", "MEDTRONIC PUERTO RICO", hasvalues$manufacturer)
+hasvalues$manufacturer <- gsub("MEDTRONIC MED REL, INC", "MEDTRONIC", hasvalues$manufacturer)
+hasvalues$manufacturer <- gsub("MEDTRONIC.", "MEDTRONIC", hasvalues$manufacturer)
+new2 <- aggregate(data=hasvalues, event_type~manufacturer, FUN="length")
+
+newnew2 <- filter(new2, event_type > 40)
+g <- ggplot(newnew2, aes(manufacturer, event_type))
+g+geom_point()+theme(axis.text.x = element_text(angle = 60, hjust=1, size = 8))+ylab("Total number of events")+xlab("")+ggtitle("Manufacturers with High Total Event Counts")
+```
+
+The average total count for each event type in each device class is low but there are many outliers--note this chart is on a log scale
+
+```{r, echo=FALSE}
+
+here <- group_by(bighasvalues, manufacturer, event_type, class) %>% 
+      summarise(count=n()) 
+
+here$manufacturer <- droplevels(here$manufacturer)
+
+plotthis <- subset(here, class %in% c("1", "2", "3"))
+
+g <- ggplot(plotthis, aes(event_type, log(count)))
+g+geom_boxplot()+theme(axis.text.x = element_text(angle = 45, hjust=1))+ylab("Log of Total number of events")+facet_grid(.~class)
+```
+
+Grouping by manufacturer and plotting those with a total of all events greater than 40 or any deaths at all. It seems that a large number of injuries or malfunctions does not necessarily imply a proportional number of deaths. 
+
+```{r, echo=FALSE}
+now<- group_by(hasvalues, manufacturer, event_type) %>% 
+                              summarise(total=n()) %>% 
+                              mutate(all=sum(total), percent=total/all)
+
+herenow <- mutate(now, hasdeath =(event_type=='Death'))
+smallnow <- subset(herenow, all>40 | hasdeath==TRUE)
+
+g <- ggplot(smallnow, aes(manufacturer, total, fill=event_type))
+g+geom_bar(stat="identity")+theme(axis.text.x = element_text(angle = 60, hjust=1, size=8))+xlab("")+ggtitle("Event Types by Manufacturers")+ylab("Total number of events")
+
+```
+
+Looking now at the relationship between malfunctions and injuries. There may possibly be two paths here. Many malfunctions have no relationship to injury count for that device, but some appear related. For instance it makes sense that the top number of injuries come from implantable devices, where malfunction 
+
+```{r, echo=FALSE}
+
+there <- group_by(hasvalues, generic_name, event_type) %>%
+                                    summarise(total=n())
+
+
+widethere <- spread(there, event_type, total)
+filterthere <- filter(widethere, Injury >0 & Malfunction >0 )
+
+#manually removing top right outlier with blank generic name
+filterthere <- filterthere[-1,]
+
+ggplot(filterthere, aes(x= Malfunction, y= Injury, label=generic_name))+
+   geom_point() + geom_text(check_overlap=TRUE, aes(label=ifelse(Injury>15,as.character(generic_name),'')), size=3, hjust=0,vjust=0, nudge_y=1)+ggtitle("Injuries and Malfunctions by Device Type")
+
+```
+
+Two further examples of an item with many malfunctions, few injuries and vice versa, again this makes intuitive sense.
+
+```{r}
+example <- arrange(ungroup(filterthere), Malfunction)
+
+glucose <- subset(example, grepl("BLOOD GLUCOSE", example$generic_name))
+colSums(glucose[2:4])
+
+defibs <- subset(example, grepl("CARDIAC", example$generic_name))
+colSums(defibs[2:4])
+```
+ 
+Looking at the adverse event flag helps distinguish which malfunctions are serious.
+
+```{r, echo=FALSE}
+forxtabs <- filter(bigdata, class %in% c("1", "2", "3"))
+forxtabs$class <- droplevels(forxtabs$class)
+xtabs(~event_type + adverse_event_flag + class, data=forxtabs)
+```
+
+Here showing the proportions of events that are serious for each class. They increase as expected as class 3 is the highest-risk class.
+
+```{r, echo=FALSE}
+
+props <- forxtabs %>% group_by(class) %>% summarise(total=n(), num_adverse=sum(adverse_event_flag=="Y"), prop=num_adverse/total)
+props
+```
+
+There are more malfunctions in class 2, and more injuries in class 3. Are there devices on the edge of being classified in one class versus the other, and given the enhanced requirements for the higher class are manufacturers lobbying for this? Exemptions and other data may illuminate the transition between the two classes.
+
+```{r, echo=FALSE}
+twovthree <- bigdata %>% group_by(class, event_type) %>% summarise(total=n())
+
+#adding a level to put all randoms into 
+levels(twovthree$class) = c(levels(twovthree$class), "unknown")
+
+
+twovthree$class[twovthree$class=="f"] <- "unknown"
+twovthree$class[twovthree$class=="N"] <- "unknown"
+twovthree$class[twovthree$class=="U"] <- "unknown"
+twovthree$class[is.na(twovthree$class)] <- "unknown"
+
+#coerces the unused level to NAs
+twovthree$event_type <- factor(twovthree$event_type, levels = c("Death","Injury", "Malfunction", "Other"))
+
+
+g <- ggplot(twovthree, aes(event_type, total, fill=class))
+g+geom_bar(stat="identity", position="dodge")+ylab("Count of events")+xlab("Type of event")
+```
+ 
+Here looking at which specialties have the highest number of each event type. Are certain panels more likely to approve dangerous devices? 
+ 
+```{r, echo=FALSE}
+
+tonight <- bigdata %>% group_by(event_type, specialty) %>% summarise(total=n())
+tonight <- filter(tonight, !(specialty %in% c("NA", "Unknown")))
+tonight <- filter(tonight, event_type %in% c("Death","Injury", "Malfunction"))
+tonight$event_type <- droplevels(tonight$event_type)
+
+ g <- ggplot(na.omit(tonight), aes(specialty, total, fill=event_type))
+g+geom_bar(stat="identity", position="dodge")+theme(axis.text.x = element_text(angle = 45, hjust=1))+scale_fill_brewer(type = "qual", palette=2)+xlab("")+ylab("Total events")+ggtitle("Number of Events by Specialty Panel")
+```
+
+```{r, echo=FALSE}
+
+```
